@@ -1,0 +1,24 @@
+# Ignore parent directory traversals
+../
+../../
+
+# Ignore heavy dataset folders and build artifacts
+oxford_spires_dataset/
+processed/
+Archive/
+Solid Models/
+swarm/
+build/
+*.o
+*.out
+
+# Ignore everything inside sequences/ EXCEPT sequences/Code/
+sequences/*
+!sequences/Code/
+
+# Track root scripts and configuration files
+!*.sh
+!*.py
+!*.cpp
+!CMakeLists.txt
+!README.md
