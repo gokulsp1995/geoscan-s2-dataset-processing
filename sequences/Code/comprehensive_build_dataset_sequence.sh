@@ -2,7 +2,7 @@
 set -e
 
 # ==============================================================================
-# GeoScan Dataset Ingestion Script (v2 - Single Bag & Updated Topics)
+# GeoScan Dataset Ingestion Script (Wantage Dataset - Oxford Spires Standard)
 # Usage: ./build_dataset_sequence_v2.sh <staging_input_folder> <target_dataset_root> <sequence_name>
 # ==============================================================================
 
@@ -15,29 +15,34 @@ STAGING_DIR="$(cd "$1" && pwd)"
 DATASET_ROOT="$(cd "$2" && pwd)"
 SEQ_NAME="$3"
 
-SEQ_DIR="${DATASET_ROOT}/${SEQ_NAME}"
+SEQ_DIR="${DATASET_ROOT}/sequences/${SEQ_NAME}"
 RAW_DIR="${SEQ_DIR}/raw"
 PROCESSED_DIR="${SEQ_DIR}/processed"
 DOCKER_IMAGE="ros:noetic-robot"
 
 echo "=================================================================="
-echo "  INGESTING GEOSCAN OUTPUT -> DATASET SEQUENCE (v2)"
+echo "  INGESTING GEOSCAN OUTPUT -> OXFORD SPIRES DATASET SEQUENCE"
 echo "  Staging Source : $STAGING_DIR"
 echo "  Dataset Target : $SEQ_DIR"
 echo "=================================================================="
 
-# 1. Create Target Directory Tree
+# 1. Create Oxford Spires Target Directory Tree
 mkdir -p "${RAW_DIR}/rosbag" \
+         "${RAW_DIR}/ros2bag" \
          "${RAW_DIR}/cam0" "${RAW_DIR}/cam1" "${RAW_DIR}/cam2" \
          "${RAW_DIR}/lidar-clouds" \
-         "${RAW_DIR}/ros2bag" \
          "${PROCESSED_DIR}/trajectory" \
-         "${PROCESSED_DIR}/maps"
+         "${PROCESSED_DIR}/vilens-slam/undist-clouds" \
+         "${PROCESSED_DIR}/colmap/0" \
+         "${DATASET_ROOT}/ground_truth_map" \
+         "${DATASET_ROOT}/calibration" \
+         "${DATASET_ROOT}/reconstruction_benchmark" \
+         "${DATASET_ROOT}/novel_view_synthesis_benchmark"
 
-# 2. Copy Raw Files (Handles single .bag files, directories, and PCD maps)
+# 2. Transfer Raw Files from Staging
 echo -e "\n[1/4] Transferring raw files from staging..."
-find "${STAGING_DIR}" -type f -name "*.bag" -exec cp {} "${RAW_DIR}/rosbag/" \;
-find "${STAGING_DIR}" -type f -name "*.pcd" -exec cp {} "${PROCESSED_DIR}/maps/" \;
+find "${STAGING_DIR}" -maxdepth 2 -type f -name "*.bag" -exec cp {} "${RAW_DIR}/rosbag/" \;
+find "${STAGING_DIR}" -maxdepth 2 -type f -name "*.pcd" -exec cp {} "${PROCESSED_DIR}/vilens-slam/undist-clouds/" \;
 
 # 3. Extract Sensor Telemetry & Trajectories via Docker
 echo -e "\n[2/4] Extracting Data Streams via Docker ($DOCKER_IMAGE)..."
@@ -85,7 +90,7 @@ base_dir = Path("/workspace")
 raw_dir = base_dir / "raw"
 traj_dir = base_dir / "processed/trajectory"
 lidar_dir = raw_dir / "lidar-clouds"
-bags = sorted(list(raw_dir.glob("rosbag/**/*.bag")))
+bags = sorted(list(raw_dir.glob("rosbag/*.bag")))
 
 if not bags:
     print("[SKIP] No .bag files found in /workspace/raw/rosbag")
@@ -104,7 +109,7 @@ imu_writer.writerow(["timestamp", "angular_velocity_x", "angular_velocity_y", "a
 gps_file = open(traj_dir / "gt-tum.txt", "w")
 gps_file.write("# timestamp tx ty tz qx qy qz qw\n")
 
-slam_file = open(traj_dir / "slam-tum.txt", "w")
+slam_file = open(traj_dir / "vilens-slam-tum.txt", "w")
 slam_file.write("# timestamp tx ty tz qx qy qz qw\n")
 
 gps_ref = None
@@ -138,7 +143,7 @@ for idx, bag_path in enumerate(bags, start=1):
                         msg.orientation.x, msg.orientation.y, msg.orientation.z, msg.orientation.w
                     ])
                     counters["imu"] += 1
-                elif topic == "/global/slam_odom":
+                elif topic in ("/global/slam_odom", "/aft_mapped_to_map"):
                     p = msg.pose.pose.position
                     o = msg.pose.pose.orientation
                     slam_file.write("{} {:.6f} {:.6f} {:.6f} {:.6f} {:.6f} {:.6f} {:.6f}\n".format(
@@ -176,14 +181,14 @@ slam_file.close()
 if not has_gps:
     (traj_dir / "gt-tum.txt").unlink(missing_ok=True)
 if not has_slam_odom:
-    (traj_dir / "slam-tum.txt").unlink(missing_ok=True)
+    (traj_dir / "vilens-slam-tum.txt").unlink(missing_ok=True)
 
 print("\n-> Extraction completed successfully.")
 PYEOF
 '
 
-# 4. Batch Convert Bags to ROS 2 (Appends _ros2)
-echo -e "\n[3/4] Converting ROS 1 bags to ROS 2..."
+# 4. Batch Convert ROS 1 Bags Directly into raw/ros2bag/ (Single Main Folder)
+echo -e "\n[3/4] Converting ROS 1 bags directly into raw/ros2bag..."
 CONVERT_BIN="rosbags-convert"
 if [ -f "$HOME/ros_tools_venv/bin/rosbags-convert" ]; then
   CONVERT_BIN="$HOME/ros_tools_venv/bin/rosbags-convert"
@@ -191,18 +196,10 @@ fi
 
 bag_list=($(find "${RAW_DIR}/rosbag" -name "*.bag" | sort))
 total_convert=${#bag_list[@]}
-current_idx=0
 
 for bag_file in "${bag_list[@]}"; do
-  current_idx=$((current_idx + 1))
-  pct=$(( (current_idx * 100) / total_convert ))
-  bag_name=$(basename "$bag_file" .bag)
-  dst_folder="${RAW_DIR}/ros2bag/${bag_name}_ros2"
-  
-  if [ ! -d "$dst_folder" ]; then
-    echo "  [${current_idx}/${total_convert}] (${pct}%) Converting: $bag_name.bag -> ${dst_folder}"
-    $CONVERT_BIN --src "$bag_file" --dst "$dst_folder"
-  fi
+  echo " Converting $bag_file directly to ${RAW_DIR}/ros2bag"
+  $CONVERT_BIN --src "$bag_file" --dst "${RAW_DIR}/ros2bag"
 done
 
 # 5. Parse External RTK NMEA Logs (if present)
@@ -251,7 +248,6 @@ chmod -R u+rwX "$SEQ_DIR" 2>/dev/null || true
 echo -e "\n=================================================================="
 echo "  INGESTION COMPLETE (100%)"
 echo "  Output Directory : $SEQ_DIR"
-echo "  Raw PCD Scans    : ${RAW_DIR}/lidar-clouds/"
-echo "  Untouched Map    : ${PROCESSED_DIR}/maps/"
-echo "  SLAM Trajectory  : ${PROCESSED_DIR}/trajectory/slam-tum.txt"
+echo "  ROS 2 Bag Location: ${RAW_DIR}/ros2bag/"
+echo "  SLAM Trajectory  : ${PROCESSED_DIR}/trajectory/vilens-slam-tum.txt"
 echo "=================================================================="
